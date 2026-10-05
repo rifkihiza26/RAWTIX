@@ -57,6 +57,10 @@ function RootShell({ children }: { children: React.ReactNode }) {
     <html lang="id">
       <head>
         <HeadContent />
+        <script 
+          src="https://app.sandbox.midtrans.com/snap/snap.js" 
+          data-client-key={import.meta.env.VITE_MIDTRANS_CLIENT_KEY}
+        ></script>
       </head>
       <body>
         {children}

@@ -45,47 +45,6 @@ function OrderSuccessPage() {
       .finally(() => setLoading(false));
   }, [orderNumber]);
 
-  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !orderNumber) return;
-
-    if (!file.type.startsWith("image/")) {
-      toast.error("Hanya file gambar yang diperbolehkan.");
-      return;
-    }
-    if (file.size > 5 * 1024 * 1024) {
-      toast.error("Ukuran file maksimal 5MB.");
-      return;
-    }
-
-    setUploading(true);
-    try {
-      const ext = file.name.split(".").pop() || "jpg";
-      const path = `${orderNumber}/${Date.now()}.${ext}`;
-
-      const { error: uploadError } = await supabase.storage
-        .from("payment-proofs")
-        .upload(path, file, { upsert: true });
-
-      if (uploadError) throw uploadError;
-
-      const { data: urlData } = supabase.storage
-        .from("payment-proofs")
-        .getPublicUrl(path);
-
-      await submitPaymentProof({
-        data: { orderNumber, proofUrl: urlData.publicUrl },
-      });
-
-      setProofSubmitted(true);
-      toast.success("Bukti pembayaran berhasil dikirim!");
-    } catch {
-      toast.error("Gagal mengunggah bukti pembayaran. Coba lagi.");
-    } finally {
-      setUploading(false);
-    }
-  };
-
   if (!orderNumber) {
     return (
       <div className="min-h-screen bg-background text-foreground">
@@ -121,8 +80,7 @@ function OrderSuccessPage() {
               Pesanan Diterima
             </h1>
             <p className="text-sm text-muted-foreground leading-relaxed">
-              Terima kasih telah berbelanja di RAWTIX. Silakan lakukan
-              pembayaran sesuai instruksi di bawah ini.
+              Terima kasih telah berbelanja di RAWTIX. Pembayaran Anda akan diproses secara otomatis oleh sistem kami.
             </p>
           </div>
 
@@ -143,82 +101,20 @@ function OrderSuccessPage() {
             <div className="flex justify-between text-sm">
               <span className="text-muted-foreground">Status</span>
               <span className="text-xs tracking-[0.15em] uppercase">
-                {proofSubmitted ? "Menunggu Verifikasi" : "Menunggu Pembayaran"}
+                {orderData?.status === 'paid' ? "Lunas" : "Menunggu Verifikasi Pembayaran"}
               </span>
             </div>
           </div>
 
-          {/* Transfer instructions */}
-          {!proofSubmitted && (
-            <div className="border border-border p-6 space-y-4">
-              <h2 className="font-heading text-xs tracking-[0.2em] uppercase">
-                Instruksi Pembayaran
-              </h2>
-              <div className="space-y-2 text-sm text-muted-foreground">
-                <p>Transfer ke rekening berikut:</p>
-                <div className="border border-border/50 p-4 text-center">
-                  <p className="font-heading text-foreground tracking-wide text-base">
-                    Transfer BCA
-                  </p>
-                  <p className="font-heading text-foreground tracking-[0.1em] text-lg mt-1">
-                    7105332998
-                  </p>
-                </div>
-                {orderData && (
-                  <p>
-                    Transfer sejumlah{" "}
-                    <span className="text-foreground font-heading">
-                      {formatPrice(orderData.total)}
-                    </span>
-                  </p>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Upload payment proof */}
-          {!proofSubmitted ? (
-            <div className="border border-border p-6 space-y-4">
-              <h2 className="font-heading text-xs tracking-[0.2em] uppercase">
-                Upload Bukti Pembayaran
-              </h2>
-              <p className="text-sm text-muted-foreground">
-                Setelah melakukan transfer, unggah bukti pembayaran di bawah
-                ini.
-              </p>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                onChange={handleUpload}
-                className="hidden"
-              />
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={uploading}
-                className="w-full py-3 text-xs tracking-[0.25em] uppercase border border-foreground/30 hover:border-foreground hover:bg-foreground hover:text-background transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {uploading ? "Mengunggah..." : "Pilih & Kirim Bukti Transfer"}
-              </button>
-              <p className="text-[11px] text-muted-foreground/70">
-                Format: JPG, PNG. Maksimal 5MB.
-              </p>
-            </div>
-          ) : (
-            <div className="border border-border p-6 text-center space-y-2">
-              <div className="w-10 h-10 mx-auto border border-foreground/30 flex items-center justify-center">
-                <span className="text-foreground">✓</span>
-              </div>
-              <p className="text-sm text-foreground">
-                Bukti pembayaran diterima
-              </p>
-              <p className="text-xs text-muted-foreground">
-                Pesanan Anda sedang menunggu verifikasi. Kami akan menghubungi
-                Anda melalui WhatsApp atau email.
-              </p>
-            </div>
-          )}
+          {/* Payment Status Info */}
+          <div className="border border-border p-6 text-center space-y-2">
+            <p className="text-sm text-foreground">
+              Status pesanan akan diupdate secara otomatis.
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Jika Anda mengalami kendala pembayaran, silakan hubungi kami melalui WhatsApp.
+            </p>
+          </div>
 
           {/* Contact */}
           <p className="text-xs text-muted-foreground text-center">

@@ -93,10 +93,62 @@ export const createOrder = createServerFn({ method: "POST" })
     }
 
     const orderResult = result as any;
+
+    // --- Request Midtrans Snap Token ---
+    let snapToken = null;
+    let redirectUrl = null;
+    const midtransServerKey = process.env.MIDTRANS_SERVER_KEY;
+    
+    try {
+      const authHeader = `Basic ${Buffer.from(midtransServerKey + ':').toString('base64')}`;
+      const midtransResponse = await fetch('https://app.sandbox.midtrans.com/snap/v1/transactions', {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+          'Authorization': authHeader
+        },
+        body: JSON.stringify({
+          transaction_details: {
+            order_id: orderNumber,
+            gross_amount: total
+          },
+          customer_details: {
+            first_name: data.customerName,
+            email: data.email,
+            phone: data.phone
+          },
+          item_details: data.items.map(item => ({
+            id: item.productId,
+            price: item.price,
+            quantity: item.quantity,
+            name: item.name
+          })).concat([{
+            id: 'shipping',
+            price: shippingCost,
+            quantity: 1,
+            name: `Ongkir - ${data.shippingMethodName || 'Reguler'}`
+          }])
+        })
+      });
+      
+      const midtransData = await midtransResponse.json();
+      if (midtransData && midtransData.token) {
+        snapToken = midtransData.token;
+        redirectUrl = midtransData.redirect_url;
+      } else {
+        console.error("Midtrans API error:", midtransData);
+      }
+    } catch (err) {
+      console.error("Midtrans fetch error:", err);
+    }
+
     return {
       orderNumber: orderResult.order_number || orderNumber,
       orderId: orderResult.id,
       total,
+      snapToken,
+      redirectUrl
     };
   });
 
@@ -141,4 +193,65 @@ export const getOrderByNumber = createServerFn({ method: "POST" })
     }
 
     return result as any;
+  });
+
+// --- Komerce / RajaOngkir API Functions ---
+
+const searchQuerySchema = z.object({
+  query: z.string().min(3).max(100),
+});
+
+export const searchDestination = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => searchQuerySchema.parse(input))
+  .handler(async ({ data }) => {
+    const apiKey = process.env.KOMERCE_API_KEY;
+    try {
+      const response = await fetch(`https://rajaongkir.komerce.id/api/v1/destination/domestic-destination?search=${encodeURIComponent(data.query)}`, {
+        headers: { "key": apiKey }
+      });
+      const result = await response.json();
+      return result?.data || [];
+    } catch (e) {
+      console.error("Search destination error:", e);
+      return [];
+    }
+  });
+
+const rateQuerySchema = z.object({
+  destinationId: z.number(),
+  weight: z.number().positive(),
+});
+
+export const getShippingRates = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => rateQuerySchema.parse(input))
+  .handler(async ({ data }) => {
+    const apiKey = process.env.KOMERCE_API_KEY;
+    try {
+      const formData = new URLSearchParams();
+      formData.append("origin", "17567"); // 17567 = Pejaten Barat (Jakarta Selatan)
+      formData.append("destination", data.destinationId.toString());
+      formData.append("weight", Math.max(1000, data.weight).toString());
+      formData.append("courier", "jne");
+
+      const response = await fetch(`https://rajaongkir.komerce.id/api/v1/calculate/domestic-cost`, {
+        method: "POST",
+        headers: { 
+          "key": apiKey,
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: formData.toString()
+      });
+      const result = await response.json();
+      const allRates = result?.data || [];
+      
+      // Filter out JTR (Cargo/Trucking) services because they confuse retail buyers
+      // We only want standard services like REG, YES, OKE, CTC (City Courier)
+      const standardRates = allRates.filter((r: any) => !r.service.startsWith('JTR'));
+      
+      // Sort by price ascending
+      return standardRates.sort((a: any, b: any) => a.cost - b.cost);
+    } catch (e) {
+      console.error("Get rates error:", e);
+      return [];
+    }
   });

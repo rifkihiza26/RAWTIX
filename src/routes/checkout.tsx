@@ -1,47 +1,50 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Header } from "@/components/layout/Header";
 import { Footer } from "@/components/layout/Footer";
 import { useCart } from "@/hooks/useCart";
 import { formatPrice } from "@/components/product/ProductCard";
-import { createOrder } from "@/utils/orders.functions";
+import { createOrder, searchDestination, getShippingRates } from "@/utils/orders.functions";
 import { useServerFn } from "@tanstack/react-start";
-import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
+
+declare global {
+  interface Window {
+    snap: any;
+  }
+}
 
 export const Route = createFileRoute("/checkout")({
   component: CheckoutPage,
 });
 
 interface ShippingRate {
-  id: string;
-  name: string;
-  price: number;
+  service: string;
+  description: string;
+  cost: number;
+  etd: string;
+}
+
+interface DestinationOption {
+  id: number;
+  label: string;
+  province_name: string;
+  city_name: string;
+  district_name: string;
+  subdistrict_name: string;
+  zip_code: string;
 }
 
 interface FormErrors {
   email?: string;
   phone?: string;
   customerName?: string;
-  province?: string;
-  city?: string;
-  district?: string;
-  postalCode?: string;
   streetAddress?: string;
+  destination?: string;
   shipping?: string;
 }
 
-function validateForm(form: {
-  email: string;
-  phone: string;
-  customerName: string;
-  province: string;
-  city: string;
-  district: string;
-  postalCode: string;
-  streetAddress: string;
-  selectedShipping: string;
-}): FormErrors {
+function validateForm(form: any): FormErrors {
   const errors: FormErrors = {};
 
   if (!form.email.trim()) errors.email = "Email wajib diisi";
@@ -53,15 +56,9 @@ function validateForm(form: {
     errors.phone = "Format nomor tidak valid";
 
   if (!form.customerName.trim()) errors.customerName = "Nama wajib diisi";
-  if (!form.province.trim()) errors.province = "Provinsi wajib diisi";
-  if (!form.city.trim()) errors.city = "Kota wajib diisi";
-  if (!form.district.trim()) errors.district = "Kecamatan wajib diisi";
   if (!form.streetAddress.trim()) errors.streetAddress = "Alamat jalan wajib diisi";
-
-  if (!form.postalCode.trim()) errors.postalCode = "Kode pos wajib diisi";
-  else if (!/^[\d\-]{3,10}$/.test(form.postalCode))
-    errors.postalCode = "Format kode pos tidak valid";
-
+  
+  if (!form.destinationId) errors.destination = "Pilih kecamatan/kota dari saran pencarian";
   if (!form.selectedShipping) errors.shipping = "Pilih metode pengiriman";
 
   return errors;
@@ -71,6 +68,8 @@ function CheckoutPage() {
   const { items, subtotal, clearCart } = useCart();
   const navigate = useNavigate();
   const createOrderFn = useServerFn(createOrder);
+  const searchDestinationFn = useServerFn(searchDestination);
+  const getShippingRatesFn = useServerFn(getShippingRates);
 
   const [shippingRates, setShippingRates] = useState<ShippingRate[]>([]);
   const [form, setForm] = useState({
@@ -84,29 +83,86 @@ function CheckoutPage() {
     streetAddress: "",
     addressDetail: "",
     specialInstructions: "",
+    destinationId: 0,
     selectedShipping: "",
   });
   const [errors, setErrors] = useState<FormErrors>({});
   const [loading, setLoading] = useState(false);
   const [submitted, setSubmitted] = useState(false);
 
+  // Search Destination State
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<DestinationOption[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [showDropdown, setShowDropdown] = useState(false);
+  const searchRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
-    supabase
-      .from("shipping_rates")
-      .select("id, name, price")
-      .eq("active", true)
-      .order("sort_order")
-      .then(({ data }) => {
-        if (data && data.length > 0) {
-          setShippingRates(data);
-          const defaultRate = data.find((r: ShippingRate & { is_default?: boolean }) => (r as ShippingRate & { is_default?: boolean }).is_default) || data[0];
-          setForm((prev) => ({ ...prev, selectedShipping: defaultRate.id }));
-        }
-      });
+    const handleClickOutside = (event: MouseEvent) => {
+      if (searchRef.current && !searchRef.current.contains(event.target as Node)) {
+        setShowDropdown(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  const selectedRate = shippingRates.find((r) => r.id === form.selectedShipping);
-  const shippingCost = selectedRate?.price ?? 0;
+  useEffect(() => {
+    if (searchQuery.length < 3) {
+      setSearchResults([]);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      setIsSearching(true);
+      try {
+        const results = await searchDestinationFn({ data: { query: searchQuery } });
+        setSearchResults(results);
+        setShowDropdown(true);
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setIsSearching(false);
+      }
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [searchQuery, searchDestinationFn]);
+
+  const selectDestination = async (opt: DestinationOption) => {
+    setSearchQuery(opt.label);
+    setShowDropdown(false);
+    setForm(prev => ({
+      ...prev,
+      destinationId: opt.id,
+      province: opt.province_name,
+      city: opt.city_name,
+      district: opt.district_name || opt.subdistrict_name,
+      postalCode: opt.zip_code,
+      selectedShipping: "" // reset shipping
+    }));
+
+    if (submitted) {
+      setErrors(prev => ({ ...prev, destination: undefined }));
+    }
+
+    // Fetch Rates
+    try {
+      const weight = items.reduce((sum, item) => sum + (item.quantity * 250), 0); // asumsi 1 item = 250gr
+      const rates = await getShippingRatesFn({ 
+        data: { destinationId: opt.id, weight: Math.max(1000, weight) } 
+      });
+      setShippingRates(rates);
+      if (rates.length > 0) {
+        setForm(prev => ({ ...prev, selectedShipping: rates[0].service }));
+      }
+    } catch (err) {
+      console.error(err);
+      toast.error("Gagal mengambil tarif pengiriman.");
+    }
+  };
+
+  const selectedRate = shippingRates.find((r) => r.service === form.selectedShipping);
+  const shippingCost = selectedRate?.cost ?? 0;
   const total = subtotal + shippingCost;
 
   const updateField = (field: string, value: string) => {
@@ -179,8 +235,8 @@ function CheckoutPage() {
           streetAddress: form.streetAddress.trim(),
           addressDetail: form.addressDetail.trim(),
           specialInstructions: form.specialInstructions.trim(),
-          shippingRateId: form.selectedShipping,
-          shippingMethodName: selectedRate?.name ?? "",
+          shippingRateId: undefined,
+          shippingMethodName: `JNE ${selectedRate?.service || ""}`,
           shippingCost,
           items: items.map((item) => ({
             productId: item.productId,
@@ -195,17 +251,35 @@ function CheckoutPage() {
       });
 
       clearCart();
-      navigate({
-        to: "/order-success",
-        search: { order: result.orderNumber },
-      });
+
+      // Trigger Midtrans Snap
+      if (result.snapToken && window.snap) {
+        window.snap.pay(result.snapToken, {
+          onSuccess: function () {
+            navigate({ to: "/order-success", search: { order: result.orderNumber } });
+          },
+          onPending: function () {
+            navigate({ to: "/order-success", search: { order: result.orderNumber } });
+          },
+          onError: function () {
+            toast.error("Pembayaran gagal. Silakan coba lagi nanti.");
+            navigate({ to: "/order-success", search: { order: result.orderNumber } });
+          },
+          onClose: function () {
+            toast.info("Anda menutup popup pembayaran.");
+            navigate({ to: "/order-success", search: { order: result.orderNumber } });
+          }
+        });
+      } else {
+        if (result.redirectUrl) {
+          window.location.href = result.redirectUrl;
+        } else {
+          navigate({ to: "/order-success", search: { order: result.orderNumber } });
+        }
+      }
     } catch (err) {
       console.error("Order error:", err);
-      toast.error(
-        err instanceof Error
-          ? err.message
-          : "Gagal membuat pesanan. Silakan coba lagi."
-      );
+      toast.error(err instanceof Error ? err.message : "Gagal membuat pesanan. Silakan coba lagi.");
     } finally {
       setLoading(false);
     }
@@ -219,9 +293,7 @@ function CheckoutPage() {
         <div className="max-w-5xl mx-auto grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-8 lg:gap-10">
           {/* Form */}
           <form onSubmit={handleSubmit} className="space-y-8">
-            <h1 className="font-heading text-xs tracking-[0.3em] uppercase">
-              Checkout
-            </h1>
+            <h1 className="font-heading text-xs tracking-[0.3em] uppercase">Checkout</h1>
 
             {/* Contact */}
             <div>
@@ -257,57 +329,57 @@ function CheckoutPage() {
                 <div>
                   <input
                     type="text"
-                    placeholder="Nama lengkap"
+                    placeholder="Nama lengkap penerima"
                     value={form.customerName}
                     onChange={(e) => updateField("customerName", e.target.value)}
                     className={inputClass("customerName")}
                   />
                   {errors.customerName && <p className="text-destructive text-xs mt-1">{errors.customerName}</p>}
                 </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <input
-                      type="text"
-                      placeholder="Provinsi"
-                      value={form.province}
-                      onChange={(e) => updateField("province", e.target.value)}
-                      className={inputClass("province")}
-                    />
-                    {errors.province && <p className="text-destructive text-xs mt-1">{errors.province}</p>}
-                  </div>
-                  <div>
-                    <input
-                      type="text"
-                      placeholder="Kota / Kabupaten"
-                      value={form.city}
-                      onChange={(e) => updateField("city", e.target.value)}
-                      className={inputClass("city")}
-                    />
-                    {errors.city && <p className="text-destructive text-xs mt-1">{errors.city}</p>}
-                  </div>
+                
+                <div className="relative" ref={searchRef}>
+                  <input
+                    type="text"
+                    placeholder="Cari Kecamatan / Kota..."
+                    value={searchQuery}
+                    onChange={(e) => {
+                      setSearchQuery(e.target.value);
+                      if (form.destinationId) {
+                        setForm(prev => ({ ...prev, destinationId: 0, province: "", city: "", district: "", postalCode: "" }));
+                        setShippingRates([]);
+                      }
+                    }}
+                    onFocus={() => {
+                      if (searchResults.length > 0) setShowDropdown(true);
+                    }}
+                    className={`w-full bg-transparent border ${errors.destination ? "border-destructive/60" : "border-border"} px-4 py-3 text-sm outline-none focus:border-foreground transition-colors placeholder:text-muted-foreground`}
+                  />
+                  {isSearching && <span className="absolute right-4 top-3.5 text-xs text-muted-foreground">Mencari...</span>}
+                  
+                  {showDropdown && searchResults.length > 0 && (
+                    <div className="absolute z-10 w-full mt-1 bg-background border border-border max-h-60 overflow-y-auto shadow-lg">
+                      {searchResults.map((opt) => (
+                        <div
+                          key={opt.id}
+                          className="px-4 py-2 text-sm hover:bg-foreground/5 cursor-pointer border-b border-border/50 last:border-0"
+                          onClick={() => selectDestination(opt)}
+                        >
+                          <p className="font-medium">{opt.subdistrict_name}, {opt.city_name}</p>
+                          <p className="text-xs text-muted-foreground">{opt.province_name} - {opt.zip_code}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {errors.destination && <p className="text-destructive text-xs mt-1">{errors.destination}</p>}
                 </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <input
-                      type="text"
-                      placeholder="Kecamatan"
-                      value={form.district}
-                      onChange={(e) => updateField("district", e.target.value)}
-                      className={inputClass("district")}
-                    />
-                    {errors.district && <p className="text-destructive text-xs mt-1">{errors.district}</p>}
+
+                {form.destinationId > 0 && (
+                  <div className="grid grid-cols-2 gap-3 opacity-70">
+                    <input disabled type="text" value={form.province} className="w-full bg-secondary/50 border border-border px-4 py-3 text-sm cursor-not-allowed" />
+                    <input disabled type="text" value={form.postalCode} className="w-full bg-secondary/50 border border-border px-4 py-3 text-sm cursor-not-allowed" />
                   </div>
-                  <div>
-                    <input
-                      type="text"
-                      placeholder="Kode pos"
-                      value={form.postalCode}
-                      onChange={(e) => updateField("postalCode", e.target.value)}
-                      className={inputClass("postalCode")}
-                    />
-                    {errors.postalCode && <p className="text-destructive text-xs mt-1">{errors.postalCode}</p>}
-                  </div>
-                </div>
+                )}
+
                 <div>
                   <input
                     type="text"
@@ -332,18 +404,22 @@ function CheckoutPage() {
 
             {/* Shipping */}
             <div>
-              <h2 className="text-xs tracking-[0.2em] uppercase mb-4">Metode Pengiriman</h2>
-              {shippingRates.length === 0 ? (
+              <h2 className="text-xs tracking-[0.2em] uppercase mb-4">Metode Pengiriman (JNE)</h2>
+              {!form.destinationId ? (
                 <p className="text-sm text-muted-foreground border border-border px-4 py-3">
-                  Belum ada opsi pengiriman. Hubungi kami untuk info lebih lanjut.
+                  Pilih kecamatan/kota pengiriman terlebih dahulu untuk melihat ongkos kirim.
+                </p>
+              ) : shippingRates.length === 0 ? (
+                <p className="text-sm text-muted-foreground border border-border px-4 py-3">
+                  Memuat opsi pengiriman...
                 </p>
               ) : (
                 <div className="space-y-2">
                   {shippingRates.map((rate) => (
                     <label
-                      key={rate.id}
+                      key={rate.service}
                       className={`flex items-center justify-between border px-4 py-3 cursor-pointer transition-colors ${
-                        form.selectedShipping === rate.id
+                        form.selectedShipping === rate.service
                           ? "border-foreground bg-foreground/5"
                           : "border-border hover:border-foreground/30"
                       }`}
@@ -352,14 +428,17 @@ function CheckoutPage() {
                         <input
                           type="radio"
                           name="shipping"
-                          value={rate.id}
-                          checked={form.selectedShipping === rate.id}
-                          onChange={() => updateField("selectedShipping", rate.id)}
+                          value={rate.service}
+                          checked={form.selectedShipping === rate.service}
+                          onChange={() => updateField("selectedShipping", rate.service)}
                           className="accent-foreground"
                         />
-                        <span className="text-sm">{rate.name}</span>
+                        <div>
+                          <span className="text-sm block">JNE {rate.service}</span>
+                          <span className="text-xs text-muted-foreground">{rate.description} ({rate.etd})</span>
+                        </div>
                       </div>
-                      <span className="text-sm font-heading">{formatPrice(rate.price)}</span>
+                      <span className="text-sm font-heading">{formatPrice(rate.cost)}</span>
                     </label>
                   ))}
                 </div>
@@ -384,7 +463,7 @@ function CheckoutPage() {
               disabled={loading}
               className="w-full py-3 text-xs tracking-[0.2em] uppercase bg-foreground text-background hover:bg-foreground/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {loading ? "Memproses..." : "Place Order"}
+              {loading ? "Memproses..." : "Bayar Sekarang"}
             </button>
           </form>
 
